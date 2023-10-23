@@ -18,9 +18,7 @@ def next_power_of_2(n):
 def num_warps(n):
     if n < 512:
         return 4
-    if n < 2048:
-        return 8
-    return 16
+    return 8 if n < 2048 else 16
 
 
 @triton.heuristics({'num_warps': lambda *args, **meta: num_warps(args[6] * meta['BLOCK'])})
@@ -141,7 +139,7 @@ class _softmax(torch.autograd.Function):
     def forward(
         ctx, x, scale, rpe, key_padding_mask, attn_mask, kp_mask_mode, attn_mask_mode, spdims, block, lut, maxlut, bench, time
     ):
-        apply_scale = False if scale == 1.0 else True
+        apply_scale = scale != 1.0
 
         # handle None rpe
         if rpe is None:
@@ -183,7 +181,7 @@ class _softmax(torch.autograd.Function):
         }
         grid = lambda opt: [spdims[0] * spdims[1] * block, M]
         _forward[grid](x, scale, lut, rpe, key_padding_mask, attn_mask, maxlut, x.stride(0),\
-                       stride_zrpe, stride_hrpe, stride_srpe, stride_zkpm, stride_zattnm, force_nc_cache=True, **meta)
+                           stride_zrpe, stride_hrpe, stride_srpe, stride_zkpm, stride_zattnm, force_nc_cache=True, **meta)
 
         # save to context
         ctx.mark_dirty(x)
@@ -233,11 +231,11 @@ class softmax:
     ):
         time_y = [None]
         if rpe is not None and rpe.dtype != x.dtype:
-            raise ValueError('relative position embedding must be %s' % x.dtype)
+            raise ValueError(f'relative position embedding must be {x.dtype}')
         if attn_mask is not None and attn_mask.dtype != x.dtype:
-            raise ValueError('Attention mask must be %s' % x.dtype)
+            raise ValueError(f'Attention mask must be {x.dtype}')
         if key_padding_mask is not None and key_padding_mask.dtype != x.dtype:
-            raise ValueError('Key padding mask must be %s' % x.dtype)
+            raise ValueError(f'Key padding mask must be {x.dtype}')
         lut, maxlut = self.make_lut(x.device)
         x = softmax.apply_softmax(
             x, scale, rpe, key_padding_mask, attn_mask, key_padding_mask_mode, attn_mask_mode, self.spdims, self.block, lut,

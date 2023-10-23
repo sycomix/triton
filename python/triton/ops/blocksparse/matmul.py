@@ -58,7 +58,6 @@ def _kernel(
             # output offset
             offnc = pid1 * TN
             offmc = column * TM
-            offpc = 0
             # dense input offset
             offnb = pid1 * TN
             offkb = tl.load(pinc)
@@ -76,7 +75,6 @@ def _kernel(
             # output offset
             offmc = pid1 * TM
             offnc = column * TN
-            offpc = 0
             # dense input offset
             offma = pid1 * TM
             offka = tl.load(pinc)
@@ -90,6 +88,7 @@ def _kernel(
             offpb = offpb * BLOCK * BLOCK
             offha = depth
             offhb = 0
+        offpc = 0
         ram = offma + tl.arange(0, TM)
         rbn = offnb + tl.arange(0, TN)
 
@@ -98,14 +97,8 @@ def _kernel(
     rkb = offkb + tl.arange(0, TK)
     pa = A + pidz * stride_za + offha * stride_ha + offpa + ram[:, None] * stride_ma + rka[None, :] * stride_ka
     pb = B + pidz * stride_zb + offhb * stride_hb + offpb + rbn[None, :] * stride_nb + rkb[:, None] * stride_kb
-    if meta['DDS']:
-        checkam = ram[:, None] < DS0
-    else:
-        checkam = AS1 > 0
-    if meta['DSD']:
-        checkbn = rbn[None, :] < DS0
-    else:
-        checkbn = AS1 > 0
+    checkam = ram[:, None] < DS0 if meta['DDS'] else AS1 > 0
+    checkbn = rbn[None, :] < DS0 if meta['DSD'] else AS1 > 0
     a = tl.load(pa, mask=checkam, other=0.)
     b = tl.load(pb, mask=checkbn, other=0.)
 
@@ -220,8 +213,7 @@ class _matmul(torch.autograd.Function):
         maxid = torch.zeros_like(segments)
         nlocks = 0
         current = 0
-        col_idx = 0
-        for i in range(len(sizes)):
+        for col_idx, i in enumerate(range(len(sizes))):
             d, r = div[i], rem[i]
             isempty = sizes[i] < seg_min
             last = current + d + (r >= seg_min) + isempty
@@ -239,7 +231,6 @@ class _matmul(torch.autograd.Function):
             if r >= seg_min or isempty:
                 segments[current + d] = r
             current = last
-            col_idx += 1
         offsets = torch.zeros_like(segments)
         offsets[1:] = torch.cumsum(segments[:-1], dim=0)
         return segments, column, lockid, maxid, offsets
@@ -294,18 +285,18 @@ class _matmul(torch.autograd.Function):
         device = a.device
 
         # create kernel
-        total_width = sum([width * pack * pack for width, pack in zip(widths, packs)])
+        total_width = sum(width * pack * pack for width, pack in zip(widths, packs))
         c = torch.zeros((batch_size, total_width, block, block), dtype=dtype, device=device)
+        num_lock = 1
+        # maximum grid size is 65535
+        # so operation might be decomposed into multiple
+        # kernel calls
+        max_width = 49152
         for lut, width, pack in zip(luts, widths, packs):
-            num_lock = 1
             meta = {'TM': block * pack, 'TN': block * pack, 'BLOCK': block, 'TK': 32, 'TZ': 1,
                     'SDD': True, 'DSD': False, 'DDS': False}
             # create output
             locks = _matmul.get_locks(2 * width * batch_size * num_lock, a.device)
-            # maximum grid size is 65535
-            # so operation might be decomposed into multiple
-            # kernel calls
-            max_width = 49152
             for off_width in range(0, width, max_width):
                 grid = lambda meta: [meta['TZ'], min(max_width, width - off_width), batch_size]
                 _kernel[grid](
@@ -626,7 +617,7 @@ class matmul:
         layout_dim = layout.ndim
         assert layout_dim in (2, 3), "Layout should be a 2 or 3 dimensional tensor of 0s and 1s"
 
-        if not mode == 'sdd':
+        if mode != 'sdd':
             # Dims to be reduced on the 'inside' of the matmul, either -1 or -2
             trans_dense, trans_sparse, sparse_inner = (trans_b, trans_a, -1) if mode == 'dsd' else (trans_a, trans_b, -2)
             self.dense_inner_dim = -((sparse_inner % 2) + 1) if not trans_dense else sparse_inner
